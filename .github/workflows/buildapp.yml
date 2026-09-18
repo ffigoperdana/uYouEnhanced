@@ -1,4 +1,4 @@
-name: Build uYouEnhanced iOS 15 - Legacy Fix
+name: Build uYouEnhanced iOS 15 - Patched
 
 on:
   workflow_dispatch:
@@ -34,7 +34,7 @@ on:
         type: string
 
       commit_id:
-        description: "uYouEnhanced commit"
+        description: "uYouEnhanced source commit"
         default: "a4da77e56e9fe912899b90993e98571eef00e8db"
         required: true
         type: string
@@ -72,7 +72,7 @@ jobs:
     steps:
 
       # ============================================================
-      # 1. CHECKOUT IOS 15-COMPATIBLE UYOUENHANCED SOURCE
+      # 1. CHECKOUT IOS 15 COMPATIBLE SOURCE
       # ============================================================
 
       - name: Checkout uYouEnhanced
@@ -84,21 +84,16 @@ jobs:
 
 
       # ============================================================
-      # 2. GENERIC LEGACY OBJECTIVE-C PATCH
+      # 2. PATCH OLD MUTABLE COLLECTION CODE
       #
-      # Fix patterns such as:
+      # Fixes old code such as:
       #
-      # NSMutableArray *x = %orig;
+      # NSMutableArray *foo = %orig;
       #
-      # into:
-      #
-      # NSArray *x_original = %orig;
-      # NSMutableArray *x = [x_original mutableCopy];
-      #
-      # This applies automatically to ALL tweaks, not only RYD.
+      # which newer Clang treats as an incompatible pointer error.
       # ============================================================
 
-      - name: Patch legacy mutable collection code
+      - name: Patch legacy mutable collections
         shell: bash
         run: |
           set -euo pipefail
@@ -109,14 +104,14 @@ jobs:
 
           ROOT = Path("main")
 
-          extensions = {
+          SOURCE_EXTENSIONS = {
               ".x",
               ".xm",
               ".m",
               ".mm",
           }
 
-          mutable_to_immutable = {
+          TYPES = {
               "NSMutableArray": "NSArray",
               "NSMutableDictionary": "NSDictionary",
               "NSMutableSet": "NSSet",
@@ -141,14 +136,13 @@ jobs:
           )
 
           total = 0
-          patched_files = []
 
           for path in ROOT.rglob("*"):
 
               if not path.is_file():
                   continue
 
-              if path.suffix not in extensions:
+              if path.suffix not in SOURCE_EXTENSIONS:
                   continue
 
               try:
@@ -158,8 +152,7 @@ jobs:
 
               lines = original.splitlines()
               output = []
-
-              file_count = 0
+              changed = False
 
               for line in lines:
 
@@ -176,35 +169,35 @@ jobs:
                   orig = match.group("orig")
                   tail = match.group("tail") or ""
 
-                  immutable = mutable_to_immutable[mutable]
+                  immutable = TYPES[mutable]
 
-                  original_var = f"__uye_legacy_original_{var}"
+                  temp_var = f"__uye_original_{var}"
 
-                  first_line = (
+                  line1 = (
                       f"{indent}"
-                      f"{immutable}{generic} *{original_var} = {orig};"
+                      f"{immutable}{generic} *{temp_var} = {orig};"
                   )
 
-                  second_line = (
+                  line2 = (
                       f"{indent}"
                       f"{mutable}{generic} *{var} = "
-                      f"[{original_var} mutableCopy];"
+                      f"[{temp_var} mutableCopy];"
                       f"{tail}"
                   )
 
                   print("")
-                  print(f"PATCHING: {path}")
-                  print(f"  OLD: {line}")
-                  print(f"  NEW: {first_line}")
-                  print(f"       {second_line}")
+                  print(f"PATCH: {path}")
+                  print(f"OLD : {line}")
+                  print(f"NEW : {line1}")
+                  print(f"      {line2}")
 
-                  output.append(first_line)
-                  output.append(second_line)
+                  output.append(line1)
+                  output.append(line2)
 
                   total += 1
-                  file_count += 1
+                  changed = True
 
-              if file_count:
+              if changed:
 
                   ending = "\n" if original.endswith("\n") else ""
 
@@ -212,32 +205,171 @@ jobs:
                       "\n".join(output) + ending
                   )
 
-                  patched_files.append(
-                      (str(path), file_count)
-                  )
-
           print("")
-          print("==========================================")
-          print("LEGACY SOURCE PATCH SUMMARY")
-          print("==========================================")
+          print("========================================")
+          print("MUTABLE COLLECTION PATCH COMPLETE")
+          print("========================================")
           print(f"Total replacements: {total}")
-
-          for filename, count in patched_files:
-              print(f"{count:3}  {filename}")
-
-          print("")
-          print("Source compatibility patch completed.")
           PY
 
 
       # ============================================================
-      # 3. ADD CLANG COMPATIBILITY FLAGS TO ALL MAKEFILES
+      # 3. PATCH OLD YOUPIP LEGACY CODE
       #
-      # Extra fallback in case another old subproject contains an
-      # incompatible pointer declaration not covered above.
+      # Old Logos:
+      #
+      # return initPlayerPiPControllerIfNeeded(%orig);
+      #
+      # breaks during Logos preprocessing.
+      #
+      # Convert it to:
+      #
+      # id tmp = %orig;
+      # return initPlayerPiPControllerIfNeeded(tmp);
       # ============================================================
 
-      - name: Add legacy compiler compatibility flags
+      - name: Patch YouPiP LegacyPiPCompat
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          FILE="main/Tweaks/YouPiP/LegacyPiPCompat.x"
+
+          if [ ! -f "$FILE" ]; then
+
+            echo "ERROR: $FILE not found."
+
+            echo ""
+            echo "Searching for LegacyPiPCompat..."
+
+            find main \
+              -iname '*LegacyPiPCompat*' \
+              -print \
+              || true
+
+            exit 1
+
+          fi
+
+
+          echo "========================================"
+          echo "YOUPIP BEFORE PATCH"
+          echo "========================================"
+
+          grep -n \
+            "initPlayerPiPControllerIfNeeded" \
+            "$FILE" \
+            || true
+
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          p = Path(
+              "main/Tweaks/YouPiP/LegacyPiPCompat.x"
+          )
+
+          original = p.read_text()
+
+          pattern = re.compile(
+              r'(?m)^'
+              r'(?P<indent>\s*)'
+              r'return\s+'
+              r'initPlayerPiPControllerIfNeeded'
+              r'\(\s*'
+              r'(?P<orig>%orig(?:\([^;\n]*\))?)'
+              r'\s*\)\s*;'
+          )
+
+          counter = 0
+
+          def replacer(match):
+
+              global counter
+
+              counter += 1
+
+              indent = match.group("indent")
+              orig = match.group("orig")
+
+              temp = f"__uye_pip_orig_{counter}"
+
+              return (
+                  f"{indent}id {temp} = {orig};\n"
+                  f"{indent}return "
+                  f"initPlayerPiPControllerIfNeeded({temp});"
+              )
+
+
+          patched, count = pattern.subn(
+              replacer,
+              original
+          )
+
+
+          if count == 0:
+
+              print("")
+              print(
+                  "WARNING: no direct "
+                  "initPlayerPiPControllerIfNeeded(%orig) "
+                  "pattern found."
+              )
+
+              print("")
+              print("Relevant source lines:")
+
+              for number, line in enumerate(
+                  original.splitlines(),
+                  1
+              ):
+
+                  if (
+                      "initPlayerPiPControllerIfNeeded"
+                      in line
+                  ):
+
+                      print(
+                          f"{number}: {line}"
+                      )
+
+              # Do not fail here.
+              # The source may already have been fixed.
+
+          else:
+
+              p.write_text(patched)
+
+              print("")
+              print(
+                  f"Patched {count} YouPiP call(s)."
+              )
+
+          PY
+
+
+          echo ""
+          echo "========================================"
+          echo "YOUPIP AFTER PATCH"
+          echo "========================================"
+
+          grep -n \
+            -B1 \
+            -A2 \
+            "initPlayerPiPControllerIfNeeded" \
+            "$FILE" \
+            || true
+
+
+      # ============================================================
+      # 4. ADD COMPILER FALLBACK FLAGS
+      #
+      # These flags prevent old pointer warnings from becoming
+      # fatal errors if another legacy tweak has the same issue.
+      # ============================================================
+
+      - name: Add legacy compiler flags
         shell: bash
         run: |
           set -euo pipefail
@@ -245,22 +377,27 @@ jobs:
           python3 - <<'PY'
           from pathlib import Path
 
-          marker = "# UYOU_IOS15_LEGACY_COMPILER_FIX"
+          marker = (
+              "# UYOU_IOS15_LEGACY_FLAGS"
+          )
 
-          flags = """
-          # UYOU_IOS15_LEGACY_COMPILER_FIX
+          block = """
+          # UYOU_IOS15_LEGACY_FLAGS
           ADDITIONAL_CFLAGS += -Wno-incompatible-pointer-types
           ADDITIONAL_CFLAGS += -Wno-error=incompatible-pointer-types
           """
 
-          flags = "\n".join(
+          block = "\n".join(
               line.strip()
-              for line in flags.strip().splitlines()
+              for line
+              in block.strip().splitlines()
           ) + "\n"
 
           count = 0
 
-          for path in Path("main").rglob("Makefile"):
+          for path in Path("main").rglob(
+              "Makefile"
+          ):
 
               try:
                   text = path.read_text()
@@ -270,32 +407,43 @@ jobs:
               if marker in text:
                   continue
 
-              # Insert before the first include so flags are visible
-              # while Theos parses/builds the target.
-              pos = text.find("\ninclude ")
+              include_pos = text.find(
+                  "\ninclude "
+              )
 
-              if pos == -1:
-                  text = text + "\n" + flags
+              if include_pos == -1:
+
+                  if not text.endswith("\n"):
+                      text += "\n"
+
+                  text += block
+
               else:
+
                   text = (
-                      text[:pos]
+                      text[:include_pos]
                       + "\n"
-                      + flags
-                      + text[pos:]
+                      + block
+                      + text[include_pos:]
                   )
 
               path.write_text(text)
 
-              print(f"Patched compiler flags: {path}")
+              print(
+                  f"Compiler flags added: {path}"
+              )
+
               count += 1
 
           print("")
-          print(f"Patched {count} Makefile(s).")
+          print(
+              f"Modified {count} Makefile(s)."
+          )
           PY
 
 
       # ============================================================
-      # 4. INSTALL BUILD DEPENDENCIES
+      # 5. INSTALL BUILD DEPENDENCIES
       # ============================================================
 
       - name: Install dependencies
@@ -310,14 +458,16 @@ jobs:
             wget
 
 
-      - name: Set GNU Make PATH
+      - name: Configure PATH
         shell: bash
         run: |
-          echo "$(brew --prefix make)/libexec/gnubin" >> "$GITHUB_PATH"
+          echo \
+            "$(brew --prefix make)/libexec/gnubin" \
+            >> "$GITHUB_PATH"
 
 
       # ============================================================
-      # 5. INSTALL THEOS
+      # 6. SETUP THEOS
       # ============================================================
 
       - name: Setup Theos
@@ -330,10 +480,10 @@ jobs:
 
 
       # ============================================================
-      # 6. DOWNLOAD IOS SDK
+      # 7. DOWNLOAD IOS 17.5 SDK
       #
-      # Compile SDK: 17.5
-      # Deployment target: 15.0
+      # This is ONLY the compiler SDK.
+      # Deployment target remains iOS 15.0.
       # ============================================================
 
       - name: Download iOS SDK
@@ -359,18 +509,21 @@ jobs:
 
           git checkout --quiet
 
-          mv *.sdk "$THEOS/sdks/"
+          mv \
+            *.sdk \
+            "$THEOS/sdks/"
+
 
           echo ""
-          echo "=========================================="
+          echo "========================================"
           echo "INSTALLED SDK"
-          echo "=========================================="
+          echo "========================================"
 
           ls -la "$THEOS/sdks/"
 
 
       # ============================================================
-      # 7. THEOS-JAILED
+      # 8. SETUP THEOS-JAILED
       # ============================================================
 
       - name: Setup Theos Jailed
@@ -379,7 +532,6 @@ jobs:
           repository: qnblackcat/theos-jailed
           ref: master
           path: theos-jailed
-          submodules: recursive
 
 
       - name: Install Theos Jailed
@@ -391,7 +543,7 @@ jobs:
 
 
       # ============================================================
-      # 8. WORKAROUND FOR THEOS BROKEN PIPE PROBLEMS
+      # 9. PATCH THEOS BROKEN PIPE BEHAVIOUR
       # ============================================================
 
       - name: Patch Theos broken pipe issue
@@ -399,11 +551,22 @@ jobs:
         run: |
           set -euo pipefail
 
-          find "$THEOS" -name "*.sh" -type f | while read -r SCRIPT; do
+          find \
+            "$THEOS" \
+            -name "*.sh" \
+            -type f \
+            | while read -r SCRIPT
+          do
 
-            if grep -q '| head' "$SCRIPT" 2>/dev/null; then
+            if grep \
+              -q \
+              '| head' \
+              "$SCRIPT" \
+              2>/dev/null
+            then
 
-              sed -i '' \
+              sed \
+                -i '' \
                 's/| head/2>\/dev\/null | head/g' \
                 "$SCRIPT" \
                 2>/dev/null \
@@ -416,11 +579,22 @@ jobs:
           done
 
 
-          find "$THEOS" -name "*.mk" -type f | while read -r MK; do
+          find \
+            "$THEOS" \
+            -name "*.mk" \
+            -type f \
+            | while read -r MK
+          do
 
-            if grep -q '| head' "$MK" 2>/dev/null; then
+            if grep \
+              -q \
+              '| head' \
+              "$MK" \
+              2>/dev/null
+            then
 
-              sed -i '' \
+              sed \
+                -i '' \
                 's/| head/2>\/dev\/null | head/g' \
                 "$MK" \
                 2>/dev/null \
@@ -432,15 +606,12 @@ jobs:
 
           done
 
-          echo ""
-          echo "Theos pipe compatibility patch completed."
-
 
       # ============================================================
-      # 9. MASK PRIVATE YOUTUBE IPA URL
+      # 10. PREPARE PRIVATE YOUTUBE DOWNLOAD URL
       # ============================================================
 
-      - name: Prepare private YouTube URL
+      - name: Prepare YouTube URL
         shell: bash
         env:
           INPUT_URL: ${{ inputs.decrypted_youtube_url }}
@@ -448,28 +619,39 @@ jobs:
           set -euo pipefail
 
           if [ -z "$INPUT_URL" ]; then
-            echo "ERROR: decrypted YouTube IPA URL is empty."
+
+            echo \
+              "ERROR: decrypted IPA URL is empty."
+
             exit 1
+
           fi
 
-          echo "::add-mask::$INPUT_URL"
 
-          echo "YOUTUBE_URL=$INPUT_URL" >> "$GITHUB_ENV"
+          echo \
+            "::add-mask::$INPUT_URL"
 
-          echo "YouTube URL registered."
+          echo \
+            "YOUTUBE_URL=$INPUT_URL" \
+            >> "$GITHUB_ENV"
+
+          echo \
+            "YouTube download URL registered."
 
 
       # ============================================================
-      # 10. DOWNLOAD + EXTRACT DECRYPTED YOUTUBE IPA
+      # 11. DOWNLOAD + EXTRACT DECRYPTED YOUTUBE IPA
       # ============================================================
 
       - name: Prepare YouTube IPA
-        id: prepare_youtube
+        id: youtube
         shell: bash
         run: |
           set -euo pipefail
 
-          echo "Downloading decrypted YouTube IPA..."
+          echo \
+            "Downloading decrypted YouTube IPA..."
+
 
           wget \
             "$YOUTUBE_URL" \
@@ -477,31 +659,41 @@ jobs:
             --show-progress \
             -O main/YouTube.ipa
 
-          if [ ! -s "main/YouTube.ipa" ]; then
 
-            echo "ERROR: downloaded IPA is empty."
+          if [ ! -s main/YouTube.ipa ]; then
+
+            echo \
+              "ERROR: downloaded IPA is empty."
+
             exit 1
 
           fi
 
 
           echo ""
-          echo "Downloaded IPA:"
-          ls -lh main/YouTube.ipa
+          echo "Downloaded file:"
+
+          ls \
+            -lh \
+            main/YouTube.ipa
 
 
           cd main
 
-          rm -rf Payload
-          rm -f YouTube.zip
 
-          mv YouTube.ipa YouTube.zip
+          rm \
+            -rf \
+            Payload
 
-          unzip -q YouTube.zip
+
+          unzip \
+            -q \
+            YouTube.ipa
 
 
           APP_DIR="$(
-            find Payload \
+            find \
+              Payload \
               -mindepth 1 \
               -maxdepth 1 \
               -type d \
@@ -513,12 +705,8 @@ jobs:
 
           if [ -z "$APP_DIR" ]; then
 
-            echo "ERROR: no .app bundle found in IPA."
-
-            echo ""
-            echo "ZIP contents:"
-
-            unzip -l YouTube.zip | head -100
+            echo \
+              "ERROR: .app bundle not found."
 
             exit 1
 
@@ -532,7 +720,8 @@ jobs:
 
           if [ "$APP_DIR" != "Payload/YouTube.app" ]; then
 
-            echo "Renaming bundle to Payload/YouTube.app"
+            echo \
+              "Renaming bundle to YouTube.app"
 
             mv \
               "$APP_DIR" \
@@ -546,26 +735,30 @@ jobs:
 
           if [ ! -f "$PLIST" ]; then
 
-            echo "ERROR: Info.plist not found."
+            echo \
+              "ERROR: Info.plist not found."
+
             exit 1
 
           fi
 
 
-          YT_VERSION="$(
+          VERSION="$(
             /usr/libexec/PlistBuddy \
-              -c "Print :CFBundleShortVersionString" \
+              -c \
+              "Print :CFBundleShortVersionString" \
               "$PLIST" \
               2>/dev/null \
               || true
           )"
 
 
-          if [ -z "$YT_VERSION" ]; then
+          if [ -z "$VERSION" ]; then
 
-            YT_VERSION="$(
+            VERSION="$(
               /usr/libexec/PlistBuddy \
-                -c "Print :CFBundleVersion" \
+                -c \
+                "Print :CFBundleVersion" \
                 "$PLIST"
             )"
 
@@ -573,65 +766,69 @@ jobs:
 
 
           echo ""
-          echo "=========================================="
-          echo "YOUTUBE VERSION: $YT_VERSION"
-          echo "=========================================="
+          echo "========================================"
+          echo "YOUTUBE VERSION: $VERSION"
+          echo "========================================"
 
 
           echo \
-            "youtube_version=$YT_VERSION" \
-            >> "$GITHUB_OUTPUT"
-
-          echo \
-            "YT_VERSION=$YT_VERSION" \
+            "YT_VERSION=$VERSION" \
             >> "$GITHUB_ENV"
 
 
+          echo \
+            "version=$VERSION" \
+            >> "$GITHUB_OUTPUT"
+
+
       # ============================================================
-      # 11. CONFIGURE MAKEFILE
-      #
-      # SDK: 17.5
-      # Minimum iOS: 15.0
+      # 12. FORCE IOS 15 DEPLOYMENT TARGET
       # ============================================================
 
       - name: Configure iOS 15 build
         shell: bash
         env:
           SDK_VERSION: ${{ inputs.sdk_version }}
-          BUNDLE_ID: ${{ inputs.bundle_id }}
+          BUNDLE: ${{ inputs.bundle_id }}
           APP_NAME: ${{ inputs.app_name }}
-          YOUTUBE_VERSION: ${{ steps.prepare_youtube.outputs.youtube_version }}
+          YT_VERSION: ${{ steps.youtube.outputs.version }}
         run: |
           set -euo pipefail
 
           cd main
 
+
           python3 - <<'PY'
+          from pathlib import Path
           import os
           import re
-          from pathlib import Path
 
           p = Path("Makefile")
 
           s = p.read_text()
 
           sdk = os.environ["SDK_VERSION"]
-          bundle = os.environ["BUNDLE_ID"]
+          bundle = os.environ["BUNDLE"]
           app = os.environ["APP_NAME"]
-          youtube = os.environ["YOUTUBE_VERSION"]
+          yt = os.environ["YT_VERSION"]
 
 
-          def replace_or_append(pattern, replacement):
+          def set_value(pattern, value):
+
               global s
 
-              if re.search(pattern, s, flags=re.MULTILINE):
+              if re.search(
+                  pattern,
+                  s,
+                  flags=re.MULTILINE
+              ):
 
                   s = re.sub(
                       pattern,
-                      replacement,
+                      value,
                       s,
                       count=1,
-                      flags=re.MULTILINE,
+                      flags=re.MULTILINE
                   )
 
               else:
@@ -639,64 +836,54 @@ jobs:
                   if not s.endswith("\n"):
                       s += "\n"
 
-                  s += replacement + "\n"
+                  s += value + "\n"
 
 
-          replace_or_append(
+          set_value(
               r'^export TARGET\s*=.*$',
               f'export TARGET = iphone:clang:{sdk}:15.0'
           )
 
-
-          replace_or_append(
-              r'^DISPLAY_NAME\s*(?:\?=|=).*$',
-              f'DISPLAY_NAME = {app}'
-          )
-
-
-          replace_or_append(
-              r'^BUNDLE_ID\s*(?:\?=|=).*$',
+          set_value(
+              r'^BUNDLE_ID\s*(?:=|\?=).*$',
               f'BUNDLE_ID = {bundle}'
           )
 
+          set_value(
+              r'^DISPLAY_NAME\s*(?:=|\?=).*$',
+              f'DISPLAY_NAME = {app}'
+          )
 
-          replace_or_append(
-              r'^YOUTUBE_VERSION\s*(?:\?=|=).*$',
-              f'YOUTUBE_VERSION = {youtube}'
+          set_value(
+              r'^YOUTUBE_VERSION\s*(?:=|\?=).*$',
+              f'YOUTUBE_VERSION = {yt}'
           )
 
 
           p.write_text(s)
 
-          print("Makefile configured.")
+          print("Main Makefile configured.")
           PY
 
 
           echo ""
-          echo "=========================================="
-          echo "FINAL BUILD CONFIG"
-          echo "=========================================="
-
-          grep -E \
-            '^(export TARGET|DISPLAY_NAME|BUNDLE_ID|YOUTUBE_VERSION)' \
-            Makefile \
-            || true
+          echo "========================================"
+          echo "FINAL CONFIG"
+          echo "========================================"
 
 
-          echo ""
-          echo "Compiler compatibility flags:"
-
-          grep -n \
-            'UYOU_IOS15_LEGACY_COMPILER_FIX' \
+          grep \
+            -E \
+            '^(export TARGET|BUNDLE_ID|DISPLAY_NAME|YOUTUBE_VERSION)' \
             Makefile \
             || true
 
 
       # ============================================================
-      # 12. VERIFY LEGACY PATTERNS ARE PATCHED
+      # 13. VERIFY LEGACY MUTABLE PATTERNS
       # ============================================================
 
-      - name: Verify legacy source patch
+      - name: Verify mutable patches
         shell: bash
         run: |
           set -euo pipefail
@@ -707,80 +894,142 @@ jobs:
 
           pattern = re.compile(
               r'^\s*'
-              r'(?:NSMutableArray|'
+              r'(?:'
+              r'NSMutableArray|'
               r'NSMutableDictionary|'
               r'NSMutableSet|'
-              r'NSMutableOrderedSet)'
+              r'NSMutableOrderedSet'
+              r')'
               r'(?:\s*<[^;\n=]+?>)?'
               r'\s*\*\s*'
               r'[A-Za-z_][A-Za-z0-9_]*'
               r'\s*=\s*'
               r'%orig(?:\([^;\n]*\))?'
               r'\s*;',
-              flags=re.MULTILINE,
+              flags=re.MULTILINE
           )
 
-          failures = []
+          failed = []
 
           for path in Path("main").rglob("*"):
 
               if (
                   not path.is_file()
-                  or path.suffix not in {".x", ".xm", ".m", ".mm"}
+                  or
+                  path.suffix
+                  not in
+                  {".x", ".xm", ".m", ".mm"}
               ):
+
                   continue
+
 
               try:
+
                   text = path.read_text()
+
               except UnicodeDecodeError:
+
                   continue
 
+
               if pattern.search(text):
-                  failures.append(str(path))
 
-          if failures:
+                  failed.append(
+                      str(path)
+                  )
 
-              print("ERROR: unpatched legacy patterns remain:")
 
-              for item in failures:
-                  print(item)
+          if failed:
+
+              print(
+                  "ERROR: old mutable/%orig "
+                  "patterns remain:"
+              )
+
+              for path in failed:
+                  print(path)
 
               raise SystemExit(1)
 
+
           print(
-              "SUCCESS: no known mutable-collection/%orig "
-              "legacy patterns remain."
+              "SUCCESS: mutable/%orig "
+              "legacy patterns are clean."
           )
           PY
 
 
       # ============================================================
-      # 13. BUILD FINAL UYOUENHANCED IPA
+      # 14. VERIFY YOUPIP PATCH
+      # ============================================================
+
+      - name: Verify YouPiP patch
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          FILE="main/Tweaks/YouPiP/LegacyPiPCompat.x"
+
+
+          if grep \
+            -E \
+            -q \
+            'return[[:space:]]+initPlayerPiPControllerIfNeeded[[:space:]]*\([[:space:]]*%orig' \
+            "$FILE"
+          then
+
+            echo ""
+            echo \
+              "ERROR: unpatched YouPiP %orig call remains."
+
+            echo ""
+
+            grep \
+              -n \
+              "initPlayerPiPControllerIfNeeded" \
+              "$FILE" \
+              || true
+
+            exit 1
+
+          fi
+
+
+          echo \
+            "SUCCESS: LegacyPiPCompat is patched."
+
+
+      # ============================================================
+      # 15. BUILD IPA
       #
-      # No cyan/re-injection step.
-      # Theos-jailed creates the IPA directly.
+      # YTUHD and SponsorBlock explicitly disabled first.
       # ============================================================
 
       - name: Build uYouEnhanced IPA
-        id: build_package
+        id: build
         shell: bash
         env:
           UYOU_VERSION: ${{ inputs.uyou_version }}
         run: |
           set -euo pipefail
 
-          mkdir -p "$THEOS/lib/iphone/rootless"
+          mkdir \
+            -p \
+            "$THEOS/lib/iphone/rootless"
+
 
           cd main
 
 
           echo ""
-          echo "=========================================="
-          echo "STARTING UYOUENHANCED BUILD"
-          echo "=========================================="
+          echo "========================================"
+          echo "START BUILD"
+          echo "========================================"
 
 
-          make package \
+          make \
+            package \
             THEOS_PACKAGE_SCHEME=rootless \
             IPA=Payload/YouTube.app \
             FINALPACKAGE=1 \
@@ -789,12 +1038,13 @@ jobs:
 
 
           echo ""
-          echo "=========================================="
-          echo "PACKAGE DIRECTORY"
-          echo "=========================================="
+          echo "========================================"
+          echo "PACKAGE OUTPUT"
+          echo "========================================"
 
 
-          find packages \
+          find \
+            packages \
             -maxdepth 1 \
             -type f \
             -print \
@@ -802,7 +1052,8 @@ jobs:
 
 
           IPA_FILE="$(
-            find packages \
+            find \
+              packages \
               -maxdepth 1 \
               -type f \
               -name '*.ipa' \
@@ -814,61 +1065,60 @@ jobs:
           if [ -z "$IPA_FILE" ]; then
 
             echo ""
-            echo "ERROR: build finished without creating an IPA."
-            echo ""
-
-            find packages \
-              -maxdepth 1 \
-              -type f \
-              -print \
-              || true
+            echo \
+              "ERROR: build did not create an IPA."
 
             exit 1
 
           fi
 
 
-          PACKAGE_NAME="$(basename "$IPA_FILE")"
+          IPA_NAME="$(
+            basename \
+              "$IPA_FILE"
+          )"
 
 
           echo ""
-          echo "=========================================="
-          echo "BUILD SUCCESS"
-          echo "=========================================="
+          echo "========================================"
+          echo "IPA CREATED"
+          echo "========================================"
 
-          echo "IPA:"
-          echo "$PACKAGE_NAME"
+          echo "$IPA_NAME"
 
-          echo ""
-          echo "Size:"
-          ls -lh "$IPA_FILE"
+          ls \
+            -lh \
+            "$IPA_FILE"
 
           echo ""
           echo "SHA256:"
-          shasum -a 256 "$IPA_FILE"
+
+          shasum \
+            -a 256 \
+            "$IPA_FILE"
 
 
           echo \
-            "package=$PACKAGE_NAME" \
+            "ipa=$IPA_NAME" \
             >> "$GITHUB_OUTPUT"
 
 
       # ============================================================
-      # 14. UPLOAD IPA
+      # 16. UPLOAD IPA AS ACTIONS ARTIFACT
       # ============================================================
 
       - name: Upload IPA Artifact
         if: ${{ inputs.upload_artifact }}
         uses: actions/upload-artifact@v4
         with:
-          name: uYouEnhanced_${{ steps.prepare_youtube.outputs.youtube_version }}_iOS15
-          path: main/packages/${{ steps.build_package.outputs.package }}
+          name: uYouEnhanced_${{ steps.youtube.outputs.version }}_iOS15
+          path: main/packages/${{ steps.build.outputs.ipa }}
           if-no-files-found: error
           compression-level: 0
 
 
       # ============================================================
-      # 15. CREATE PRIVATE DRAFT RELEASE
+      # 17. CREATE DRAFT RELEASE
       # ============================================================
 
       - name: Create Draft Release
@@ -877,30 +1127,34 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tag_name: ios15-${{ github.run_number }}
-          name: uYouEnhanced iOS 15 - Build ${{ github.run_number }}
+          tag_name: ios15-build-${{ github.run_number }}
+          name: uYouEnhanced iOS 15 Build ${{ github.run_number }}
           draft: true
           prerelease: false
-          files: main/packages/${{ steps.build_package.outputs.package }}
+          files: main/packages/${{ steps.build.outputs.ipa }}
+
           body: |
-            uYouEnhanced custom iOS/iPadOS 15 build.
+            Custom uYouEnhanced build for iOS/iPadOS 15.
 
             YouTube:
-            ${{ steps.prepare_youtube.outputs.youtube_version }}
+            ${{ steps.youtube.outputs.version }}
 
             uYou:
             ${{ inputs.uyou_version }}
 
-            Source commit:
+            Source:
             ${{ inputs.commit_id }}
 
-            Compatibility fixes:
-            - Automatic legacy NSMutable collection patch
-            - Legacy Clang incompatible-pointer compatibility flags
-            - iOS 15.0 deployment target
+            Compatibility patches:
+            - Generic NSMutable collection / %orig fix
+            - YouPiP LegacyPiPCompat fix
+            - Legacy compiler pointer compatibility flags
+            - Deployment target iOS 15.0
             - SDK 17.5
-            - YTUHD disabled for first stable build
-            - SponsorBlock optional build flag disabled
+
+            First stable build:
+            - YTUHD disabled
+            - SponsorBlock build flag disabled
 
             Intended installer:
             TrollStore
