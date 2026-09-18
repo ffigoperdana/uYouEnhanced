@@ -1,4 +1,4 @@
-name: Build uYouEnhanced iOS 15 - Stable
+name: Build uYouEnhanced iOS 15 - Legacy Toolchain
 
 on:
   workflow_dispatch:
@@ -72,7 +72,7 @@ jobs:
     steps:
 
       # ============================================================
-      # 1. CHECKOUT OLD IOS 15-COMPATIBLE SOURCE
+      # 1. CHECKOUT UYOUENHANCED IOS 15 RELEASE
       # ============================================================
 
       - name: Checkout uYouEnhanced
@@ -84,17 +84,21 @@ jobs:
 
 
       # ============================================================
-      # 2. DISABLE LEGACY COMPONENTS THAT FAIL ON MODERN TOOLCHAIN
+      # 2. PATCH OLD MUTABLE COLLECTION ASSIGNMENTS
       #
-      # Disabled:
-      # - Return YouTube Dislikes
-      # - YTABConfig
-      # - YouPiP
+      # Newer Clang rejects e.g.
       #
-      # They can be restored later after we have a working IPA.
+      # NSMutableArray *x = %orig;
+      #
+      # if %orig returns NSArray.
+      #
+      # This converts it to:
+      #
+      # NSArray *original = %orig;
+      # NSMutableArray *x = [original mutableCopy];
       # ============================================================
 
-      - name: Disable incompatible legacy tweaks
+      - name: Patch legacy mutable collection assignments
         shell: bash
         run: |
           set -euo pipefail
@@ -103,155 +107,117 @@ jobs:
           from pathlib import Path
           import re
 
-          p = Path("main/Makefile")
+          ROOT = Path("main")
 
-          if not p.exists():
-              raise SystemExit("ERROR: main/Makefile not found")
+          extensions = {
+              ".x",
+              ".xm",
+              ".m",
+              ".mm",
+          }
 
-          s = p.read_text()
+          types = {
+              "NSMutableArray": "NSArray",
+              "NSMutableDictionary": "NSDictionary",
+              "NSMutableSet": "NSSet",
+              "NSMutableOrderedSet": "NSOrderedSet",
+          }
 
-          print("==========================================")
-          print("REMOVING LEGACY TWEAKS")
-          print("==========================================")
+          pattern = re.compile(
+              r'^(?P<indent>\s*)'
+              r'(?P<mutable>'
+              r'NSMutableArray|'
+              r'NSMutableDictionary|'
+              r'NSMutableSet|'
+              r'NSMutableOrderedSet'
+              r')'
+              r'(?P<generic>\s*<[^;\n=]+?>)?'
+              r'\s*\*\s*'
+              r'(?P<var>[A-Za-z_][A-Za-z0-9_]*)'
+              r'\s*=\s*'
+              r'(?P<orig>%orig(?:\([^;\n]*\))?)'
+              r'\s*;'
+              r'(?P<tail>\s*(?://.*)?)$'
+          )
 
-          disabled_projects = [
-              "Tweaks/Return-YouTube-Dislikes",
-              "Tweaks/YTABConfig",
-              "Tweaks/YouPiP",
-              "Tweaks/YTVideoOverlay",
-          ]
+          total = 0
 
-          disabled_dylibs = [
-              "YouTubeDislikesReturn.dylib",
-              "YTABConfig.dylib",
-              "YouPiP.dylib",
-              "YTVideoOverlay.dylib",
-          ]
+          for path in ROOT.rglob("*"):
 
-          # Remove complete INJECT_DYLIBS lines for the disabled dylibs.
-          lines = s.splitlines()
-
-          new_lines = []
-
-          for line in lines:
-
-              if any(dylib in line for dylib in disabled_dylibs):
-                  print(f"Removing dylib line: {line}")
+              if not path.is_file():
                   continue
 
-              # Remove disabled SUBPROJECT tokens while preserving
-              # other projects on the same line.
-              if "SUBPROJECTS" in line:
-
-                  original_line = line
-
-                  for project in disabled_projects:
-                      line = line.replace(project, "")
-
-                  # Normalize excess spaces.
-                  line = re.sub(r'[ \t]+', ' ', line).rstrip()
-
-                  if line != original_line:
-                      print("Modified SUBPROJECTS:")
-                      print(f"  OLD: {original_line}")
-                      print(f"  NEW: {line}")
-
-              new_lines.append(line)
-
-          s = "\n".join(new_lines)
-
-          if not s.endswith("\n"):
-              s += "\n"
-
-          p.write_text(s)
-
-          print("")
-          print("Legacy tweak removal complete.")
-          PY
-
-
-          echo ""
-          echo "=========================================="
-          echo "VERIFY DISABLED TWEAKS"
-          echo "=========================================="
-
-          if grep -E \
-            'Tweaks/Return-YouTube-Dislikes|Tweaks/YTABConfig|Tweaks/YouPiP|Tweaks/YTVideoOverlay|YouTubeDislikesReturn\.dylib|YTABConfig\.dylib|YouPiP\.dylib|YTVideoOverlay\.dylib' \
-            main/Makefile
-          then
-
-            echo ""
-            echo "ERROR: disabled tweak reference remains in main Makefile"
-            exit 1
-
-          fi
-
-          echo "SUCCESS: RYD, YTABConfig and YouPiP are disabled."
-
-
-      # ============================================================
-      # 3. ADD COMPILER COMPATIBILITY FLAGS
-      #
-      # Helps old Objective-C projects compile on modern Clang.
-      # ============================================================
-
-      - name: Add legacy compiler compatibility flags
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          python3 - <<'PY'
-          from pathlib import Path
-
-          marker = "# UYOU_IOS15_COMPAT_FLAGS"
-
-          block = """
-          # UYOU_IOS15_COMPAT_FLAGS
-          ADDITIONAL_CFLAGS += -Wno-error
-          ADDITIONAL_CFLAGS += -Wno-incompatible-pointer-types
-          ADDITIONAL_CFLAGS += -Wno-error=incompatible-pointer-types
-          ADDITIONAL_CFLAGS += -Wno-deprecated-declarations
-          """
-
-          block = "\n".join(
-              x.strip()
-              for x in block.strip().splitlines()
-          ) + "\n"
-
-          count = 0
-
-          for p in Path("main").rglob("Makefile"):
+              if path.suffix not in extensions:
+                  continue
 
               try:
-                  s = p.read_text()
+                  original = path.read_text()
               except UnicodeDecodeError:
                   continue
 
-              if marker in s:
-                  continue
+              output = []
+              changed = False
 
-              # Put flags before the first Theos include.
-              idx = s.find("\ninclude ")
+              for line in original.splitlines():
 
-              if idx >= 0:
-                  s = s[:idx] + "\n" + block + s[idx:]
-              else:
-                  if not s.endswith("\n"):
-                      s += "\n"
-                  s += block
+                  m = pattern.match(line)
 
-              p.write_text(s)
+                  if not m:
+                      output.append(line)
+                      continue
 
-              print(f"Compatibility flags added: {p}")
-              count += 1
+                  indent = m.group("indent")
+                  mutable = m.group("mutable")
+                  immutable = types[mutable]
+                  generic = m.group("generic") or ""
+                  var = m.group("var")
+                  orig = m.group("orig")
+                  tail = m.group("tail") or ""
+
+                  tmp = f"__uye_original_{var}"
+
+                  first = (
+                      f"{indent}"
+                      f"{immutable}{generic} *{tmp} = {orig};"
+                  )
+
+                  second = (
+                      f"{indent}"
+                      f"{mutable}{generic} *{var} = "
+                      f"[{tmp} mutableCopy];"
+                      f"{tail}"
+                  )
+
+                  print("")
+                  print(f"PATCH: {path}")
+                  print(f"OLD: {line}")
+                  print(f"NEW: {first}")
+                  print(f"     {second}")
+
+                  output.append(first)
+                  output.append(second)
+
+                  total += 1
+                  changed = True
+
+              if changed:
+
+                  ending = "\n" if original.endswith("\n") else ""
+
+                  path.write_text(
+                      "\n".join(output) + ending
+                  )
 
           print("")
-          print(f"Patched {count} Makefile(s).")
+          print("==========================================")
+          print("MUTABLE PATCH SUMMARY")
+          print("==========================================")
+          print(f"Total patched assignments: {total}")
           PY
 
 
       # ============================================================
-      # 4. INSTALL DEPENDENCIES
+      # 3. INSTALL HOST DEPENDENCIES
       # ============================================================
 
       - name: Install dependencies
@@ -275,23 +241,133 @@ jobs:
 
 
       # ============================================================
-      # 5. SETUP THEOS
+      # 4. CHECKOUT THEOS
+      #
+      # IMPORTANT:
+      # fetch-depth 0 lets us select the Theos revision that existed
+      # around the uYouEnhanced June 2025 release.
       # ============================================================
 
-      - name: Setup Theos
+      - name: Checkout Theos
         uses: actions/checkout@v4
         with:
           repository: theos/theos
-          ref: master
           path: theos
-          submodules: recursive
+          fetch-depth: 0
+          submodules: false
+
+
+      # ============================================================
+      # 5. PIN THEOS + LOGOS TO JUNE 2025
+      #
+      # Instead of using 2026 master, select the last Theos commit
+      # that existed before June 14 2025 and initialize the exact
+      # submodule revisions recorded by that commit.
+      # ============================================================
+
+      - name: Pin Theos and Logos to June 2025
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd "$THEOS"
+
+          echo ""
+          echo "=========================================="
+          echo "CURRENT THEOS"
+          echo "=========================================="
+
+          git rev-parse HEAD
+          git log -1 --format='%H %ci %s'
+
+
+          echo ""
+          echo "Finding Theos revision from June 2025..."
+
+          LEGACY_THEOS_COMMIT="$(
+            git rev-list \
+              -n 1 \
+              --before='2025-06-14 00:00:00 +0000' \
+              origin/master
+          )"
+
+
+          if [ -z "$LEGACY_THEOS_COMMIT" ]; then
+            echo "ERROR: Could not find June 2025 Theos revision."
+            exit 1
+          fi
+
+
+          echo ""
+          echo "Legacy Theos commit:"
+          echo "$LEGACY_THEOS_COMMIT"
+
+
+          git checkout \
+            --detach \
+            "$LEGACY_THEOS_COMMIT"
+
+
+          echo ""
+          echo "Initializing historical Theos submodules..."
+
+          git submodule sync --recursive
+
+          git submodule update \
+            --init \
+            --recursive
+
+
+          echo ""
+          echo "=========================================="
+          echo "PINNED THEOS"
+          echo "=========================================="
+
+          git log -1 \
+            --format='%H %ci %s'
+
+
+          echo ""
+          echo "Submodule revisions:"
+
+          git submodule status --recursive
+
+
+          echo ""
+          echo "Logos revision:"
+
+          if [ -d vendor/logos ]; then
+
+            cd vendor/logos
+
+            git rev-parse HEAD
+            git log -1 --format='%H %ci %s'
+
+          elif [ -d logos ]; then
+
+            cd logos
+
+            git rev-parse HEAD
+            git log -1 --format='%H %ci %s'
+
+          else
+
+            echo "Logos directory location:"
+            find "$THEOS" \
+              -maxdepth 3 \
+              -type d \
+              -iname '*logos*' \
+              -print \
+              || true
+
+          fi
 
 
       # ============================================================
       # 6. DOWNLOAD IOS SDK
       #
-      # SDK 17.5 = compile SDK
-      # iOS 15.0 = deployment target
+      # Build SDK = 17.5
+      # Minimum runtime = iOS 15.0
       # ============================================================
 
       - name: Download iOS SDK
@@ -319,8 +395,12 @@ jobs:
 
           mv *.sdk "$THEOS/sdks/"
 
+
           echo ""
-          echo "Installed SDKs:"
+          echo "=========================================="
+          echo "INSTALLED SDK"
+          echo "=========================================="
+
           ls -la "$THEOS/sdks/"
 
 
@@ -328,7 +408,7 @@ jobs:
       # 7. SETUP THEOS-JAILED
       # ============================================================
 
-      - name: Setup Theos Jailed
+      - name: Checkout Theos Jailed
         uses: actions/checkout@v4
         with:
           repository: qnblackcat/theos-jailed
@@ -345,7 +425,7 @@ jobs:
 
 
       # ============================================================
-      # 8. THEOS BROKEN PIPE WORKAROUND
+      # 8. PATCH POSSIBLE BROKEN PIPE ISSUE
       # ============================================================
 
       - name: Patch Theos broken pipe issue
@@ -365,8 +445,6 @@ jobs:
                 2>/dev/null \
                 || true
 
-              echo "Patched: $FILE"
-
             fi
 
           done
@@ -384,15 +462,13 @@ jobs:
                 2>/dev/null \
                 || true
 
-              echo "Patched: $FILE"
-
             fi
 
           done
 
 
       # ============================================================
-      # 9. INSTALL TOOLS USED BY THEOS-JAILED
+      # 9. INSTALL CYAN + TBD
       # ============================================================
 
       - name: Install cyan and tbd
@@ -420,7 +496,7 @@ jobs:
 
 
       # ============================================================
-      # 10. PREPARE PRIVATE IPA URL
+      # 10. STORE PRIVATE YOUTUBE IPA URL
       # ============================================================
 
       - name: Prepare YouTube URL
@@ -430,21 +506,22 @@ jobs:
         run: |
           set -euo pipefail
 
-          if [ -z "$INPUT_URL" ]
-          then
-            echo "ERROR: decrypted YouTube URL is empty."
+          if [ -z "$INPUT_URL" ]; then
+
+            echo "ERROR: decrypted YouTube IPA URL is empty."
             exit 1
+
           fi
 
           echo "::add-mask::$INPUT_URL"
 
-          echo "YOUTUBE_URL=$INPUT_URL" >> "$GITHUB_ENV"
-
-          echo "YouTube download URL registered."
+          echo \
+            "YOUTUBE_URL=$INPUT_URL" \
+            >> "$GITHUB_ENV"
 
 
       # ============================================================
-      # 11. DOWNLOAD DECRYPTED YOUTUBE IPA
+      # 11. DOWNLOAD + EXTRACT YOUTUBE IPA
       # ============================================================
 
       - name: Prepare YouTube IPA
@@ -462,8 +539,7 @@ jobs:
             -O main/YouTube.ipa
 
 
-          if [ ! -s "main/YouTube.ipa" ]
-          then
+          if [ ! -s "main/YouTube.ipa" ]; then
 
             echo "ERROR: downloaded IPA is empty."
             exit 1
@@ -473,6 +549,7 @@ jobs:
 
           echo ""
           echo "Downloaded IPA:"
+
           ls -lh main/YouTube.ipa
 
 
@@ -496,24 +573,19 @@ jobs:
           )"
 
 
-          if [ -z "$APP_DIR" ]
-          then
+          if [ -z "$APP_DIR" ]; then
 
-            echo "ERROR: .app bundle not found inside IPA."
+            echo "ERROR: .app bundle not found."
             exit 1
 
           fi
 
 
-          echo ""
-          echo "App bundle:"
-          echo "$APP_DIR"
+          if [ "$APP_DIR" != "Payload/YouTube.app" ]; then
 
-
-          if [ "$APP_DIR" != "Payload/YouTube.app" ]
-          then
-
-            echo "Renaming to Payload/YouTube.app"
+            echo "Renaming:"
+            echo "$APP_DIR"
+            echo "-> Payload/YouTube.app"
 
             mv \
               "$APP_DIR" \
@@ -525,10 +597,9 @@ jobs:
           PLIST="Payload/YouTube.app/Info.plist"
 
 
-          if [ ! -f "$PLIST" ]
-          then
+          if [ ! -f "$PLIST" ]; then
 
-            echo "ERROR: Info.plist not found."
+            echo "ERROR: Info.plist missing."
             exit 1
 
           fi
@@ -543,8 +614,7 @@ jobs:
           )"
 
 
-          if [ -z "$VERSION" ]
-          then
+          if [ -z "$VERSION" ]; then
 
             VERSION="$(
               /usr/libexec/PlistBuddy \
@@ -557,26 +627,31 @@ jobs:
 
           echo ""
           echo "=========================================="
-          echo "YOUTUBE VERSION: $VERSION"
+          echo "YOUTUBE VERSION"
           echo "=========================================="
+          echo "$VERSION"
 
 
-          echo "YT_VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo \
+            "YT_VERSION=$VERSION" \
+            >> "$GITHUB_ENV"
 
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo \
+            "version=$VERSION" \
+            >> "$GITHUB_OUTPUT"
 
 
       # ============================================================
-      # 12. CONFIGURE IOS 15 BUILD
+      # 12. CONFIGURE IOS 15 TARGET
       # ============================================================
 
       - name: Configure iOS 15 build
         shell: bash
         env:
           SDK_VERSION: ${{ inputs.sdk_version }}
-          INPUT_BUNDLE_ID: ${{ inputs.bundle_id }}
-          INPUT_APP_NAME: ${{ inputs.app_name }}
-          INPUT_YT_VERSION: ${{ steps.youtube.outputs.version }}
+          INPUT_BUNDLE: ${{ inputs.bundle_id }}
+          INPUT_NAME: ${{ inputs.app_name }}
+          INPUT_YT: ${{ steps.youtube.outputs.version }}
         run: |
           set -euo pipefail
 
@@ -584,21 +659,20 @@ jobs:
 
 
           python3 - <<'PY'
+          from pathlib import Path
           import os
           import re
-          from pathlib import Path
 
           p = Path("Makefile")
-
           s = p.read_text()
 
           sdk = os.environ["SDK_VERSION"]
-          bundle = os.environ["INPUT_BUNDLE_ID"]
-          name = os.environ["INPUT_APP_NAME"]
-          yt = os.environ["INPUT_YT_VERSION"]
+          bundle = os.environ["INPUT_BUNDLE"]
+          name = os.environ["INPUT_NAME"]
+          youtube = os.environ["INPUT_YT"]
 
 
-          def replace_or_append(pattern, value):
+          def set_value(pattern, replacement):
 
               global s
 
@@ -610,7 +684,7 @@ jobs:
 
                   s = re.sub(
                       pattern,
-                      value,
+                      replacement,
                       s,
                       count=1,
                       flags=re.MULTILINE
@@ -621,27 +695,27 @@ jobs:
                   if not s.endswith("\n"):
                       s += "\n"
 
-                  s += value + "\n"
+                  s += replacement + "\n"
 
 
-          replace_or_append(
+          set_value(
               r'^export TARGET\s*=.*$',
               f'export TARGET = iphone:clang:{sdk}:15.0'
           )
 
-          replace_or_append(
+          set_value(
               r'^BUNDLE_ID\s*(?:=|\?=).*$',
               f'BUNDLE_ID = {bundle}'
           )
 
-          replace_or_append(
+          set_value(
               r'^DISPLAY_NAME\s*(?:=|\?=).*$',
               f'DISPLAY_NAME = {name}'
           )
 
-          replace_or_append(
+          set_value(
               r'^YOUTUBE_VERSION\s*(?:=|\?=).*$',
-              f'YOUTUBE_VERSION = {yt}'
+              f'YOUTUBE_VERSION = {youtube}'
           )
 
 
@@ -653,7 +727,7 @@ jobs:
 
           echo ""
           echo "=========================================="
-          echo "FINAL BUILD CONFIG"
+          echo "BUILD CONFIG"
           echo "=========================================="
 
           grep \
@@ -664,42 +738,55 @@ jobs:
 
 
       # ============================================================
-      # 13. FINAL SANITY CHECK
-      #
-      # This guarantees the known broken components cannot
-      # accidentally be compiled.
+      # 13. SHOW TOOLCHAIN INFO BEFORE BUILD
       # ============================================================
 
-      - name: Verify stable build configuration
+      - name: Show build environment
         shell: bash
         run: |
           set -euo pipefail
 
-          echo "Checking disabled components..."
+          echo "=========================================="
+          echo "XCODE"
+          echo "=========================================="
 
-          if grep -E \
-            'Tweaks/Return-YouTube-Dislikes|Tweaks/YTABConfig|Tweaks/YouPiP|Tweaks/YTVideoOverlay|YouTubeDislikesReturn\.dylib|YTABConfig\.dylib|YouPiP\.dylib|YTVideoOverlay\.dylibTweaks/Return-YouTube-Dislikes|Tweaks/YTABConfig|Tweaks/YouPiP|Tweaks/YTVideoOverlay|YouTubeDislikesReturn\.dylib|YTABConfig\.dylib|YouPiP\.dylib|YTVideoOverlay\.dylib' \
-            main/Makefile
-          then
-
-            echo ""
-            echo "ERROR: broken legacy component is still referenced."
-            exit 1
-
-          fi
+          xcodebuild -version || true
 
 
-          echo "SUCCESS:"
-          echo "- Return YouTube Dislikes disabled"
-          echo "- YTABConfig disabled"
-          echo "- YouPiP disabled"
+          echo ""
+          echo "=========================================="
+          echo "CLANG"
+          echo "=========================================="
+
+          clang --version || true
+
+
+          echo ""
+          echo "=========================================="
+          echo "THEOS"
+          echo "=========================================="
+
+          cd "$THEOS"
+
+          git log -1 \
+            --format='%H %ci %s'
+
+
+          echo ""
+          echo "=========================================="
+          echo "THEOS SUBMODULES"
+          echo "=========================================="
+
+          git submodule status --recursive
 
 
       # ============================================================
-      # 14. BUILD IPA
+      # 14. BUILD
       #
-      # YTUHD and iSponsorBlock build flags OFF for first stable
-      # build to reduce possible failure points.
+      # Important:
+      # No component is disabled here.
+      # We are trying to reproduce the older build environment
+      # instead of deleting half of uYouEnhanced.
       # ============================================================
 
       - name: Build uYouEnhanced IPA
@@ -720,7 +807,7 @@ jobs:
 
           echo ""
           echo "=========================================="
-          echo "STARTING STABLE IOS 15 BUILD"
+          echo "STARTING BUILD"
           echo "=========================================="
 
 
@@ -730,12 +817,13 @@ jobs:
             IPA=Payload/YouTube.app \
             FINALPACKAGE=1 \
             YTUHD_ENABLED=0 \
-            SPONSORBLOCK_ENABLED=0
+            SPONSORBLOCK_ENABLED=0 \
+            ADDITIONAL_CFLAGS="-Wno-error=incompatible-pointer-types -Wno-incompatible-pointer-types -Wno-deprecated-declarations"
 
 
           echo ""
           echo "=========================================="
-          echo "BUILD OUTPUT"
+          echo "PACKAGE OUTPUT"
           echo "=========================================="
 
 
@@ -758,29 +846,29 @@ jobs:
           )"
 
 
-          if [ -z "$IPA_FILE" ]
-          then
+          if [ -z "$IPA_FILE" ]; then
 
             echo ""
-            echo "ERROR: build completed but no IPA was created."
+            echo "ERROR: no IPA was produced."
+
             exit 1
 
           fi
 
 
-          IPA_NAME="$(basename "$IPA_FILE")"
+          IPA_NAME="$(
+            basename "$IPA_FILE"
+          )"
 
 
           echo ""
           echo "=========================================="
-          echo "IPA CREATED SUCCESSFULLY"
+          echo "IPA CREATED"
           echo "=========================================="
 
           echo "$IPA_NAME"
 
-          ls \
-            -lh \
-            "$IPA_FILE"
+          ls -lh "$IPA_FILE"
 
 
           echo ""
@@ -791,18 +879,20 @@ jobs:
             "$IPA_FILE"
 
 
-          echo "ipa=$IPA_NAME" >> "$GITHUB_OUTPUT"
+          echo \
+            "ipa=$IPA_NAME" \
+            >> "$GITHUB_OUTPUT"
 
 
       # ============================================================
-      # 15. UPLOAD IPA
+      # 15. UPLOAD RESULT
       # ============================================================
 
       - name: Upload IPA Artifact
         if: ${{ inputs.upload_artifact }}
         uses: actions/upload-artifact@v4
         with:
-          name: uYouEnhanced_${{ steps.youtube.outputs.version }}_iOS15_Stable
+          name: uYouEnhanced_${{ steps.youtube.outputs.version }}_iOS15
           path: main/packages/${{ steps.build.outputs.ipa }}
           if-no-files-found: error
           compression-level: 0
@@ -818,14 +908,14 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tag_name: ios15-stable-${{ github.run_number }}
-          name: uYouEnhanced iOS 15 Stable Build ${{ github.run_number }}
+          tag_name: ios15-legacy-${{ github.run_number }}
+          name: uYouEnhanced iOS 15 Legacy Build ${{ github.run_number }}
           draft: true
           prerelease: false
           files: main/packages/${{ steps.build.outputs.ipa }}
 
           body: |
-            Custom uYouEnhanced build for iOS/iPadOS 15.
+            uYouEnhanced iOS/iPadOS 15 custom build.
 
             YouTube:
             ${{ steps.youtube.outputs.version }}
@@ -833,17 +923,17 @@ jobs:
             uYou:
             ${{ inputs.uyou_version }}
 
-            Source commit:
+            uYouEnhanced source:
             ${{ inputs.commit_id }}
 
-            Build configuration:
-            - iOS deployment target 15.0
+            Build strategy:
+            - Source from v20.05.4-3.0.4 era
+            - Theos pinned to June 2025
+            - Logos pinned through historical Theos submodule state
             - SDK 17.5
-            - Return YouTube Dislikes disabled
-            - YTABConfig disabled
-            - YouPiP disabled
-            - YTUHD disabled
-            - SponsorBlock build flag disabled
+            - Deployment target iOS 15.0
+            - Legacy mutable-collection compatibility patch
+            - No major uYouEnhanced component disabled
 
             Intended installer:
             TrollStore
