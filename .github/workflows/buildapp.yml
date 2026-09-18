@@ -423,6 +423,40 @@ jobs:
 
           ./theos-jailed/install
 
+      - name: Install PSHeader and YouTubeHeader
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ ! -f "main/Tweaks/PSHeader/Misc.h" ]; then
+            echo "ERROR: PSHeader missing."
+            exit 1
+          fi
+
+          if [ ! -f "main/Tweaks/YouTubeHeader/YTLikeStatus.h" ]; then
+            echo "ERROR: YouTubeHeader missing."
+            exit 1
+          fi
+
+          mkdir -p "$THEOS/include"
+
+          rm -rf "$THEOS/include/PSHeader"
+          rm -rf "$THEOS/include/YouTubeHeader"
+          rm -rf "$THEOS/include/YTHeaders"
+
+          cp -R main/Tweaks/PSHeader \
+            "$THEOS/include/PSHeader"
+
+          cp -R main/Tweaks/YouTubeHeader \
+            "$THEOS/include/YouTubeHeader"
+
+          cp -R "$THEOS/include/YouTubeHeader" \
+            "$THEOS/include/YTHeaders"
+
+          test -f "$THEOS/include/PSHeader/Misc.h"
+          test -f "$THEOS/include/YouTubeHeader/YTLikeStatus.h"
+
+          echo "Headers installed successfully."
 
       # ============================================================
       # 8. PATCH POSSIBLE BROKEN PIPE ISSUE
