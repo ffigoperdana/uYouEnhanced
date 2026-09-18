@@ -75,6 +75,24 @@ jobs:
           path: main
           ref: ${{ github.event.inputs.commit_id || github.ref }}
           submodules: recursive
+          
+      - name: Patch old Return YouTube Dislikes
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path("main/Tweaks/Return-YouTube-Dislikes/Settings.x")
+          s = p.read_text()
+
+          old = "NSMutableArray *mutableCategories = %orig;"
+          new = "NSMutableArray *mutableCategories = %orig.mutableCopy;"
+
+          if old not in s:
+              raise SystemExit("Patch target not found")
+
+          p.write_text(s.replace(old, new, 1))
+          print("Return YouTube Dislikes patched successfully")
+          PY
 
       - name: Install Dependencies
         run: |
