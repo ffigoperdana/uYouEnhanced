@@ -1,4 +1,4 @@
-name: Build uYouEnhanced iOS 15 - Legacy Toolchain
+name: Build uYouEnhanced iOS 15 - Clean Legacy Build
 
 on:
   workflow_dispatch:
@@ -72,11 +72,11 @@ jobs:
     steps:
 
       # ============================================================
-      # 1. CHECKOUT UYOUENHANCED IOS 15 RELEASE
+      # 1. CHECKOUT UYOUENHANCED RELEASE SOURCE
       # ============================================================
 
       - name: Checkout uYouEnhanced
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           path: main
           ref: ${{ inputs.commit_id }}
@@ -84,18 +84,18 @@ jobs:
 
 
       # ============================================================
-      # 2. PATCH OLD MUTABLE COLLECTION ASSIGNMENTS
+      # 2. PATCH OLD MUTABLE COLLECTION CODE
       #
-      # Newer Clang rejects e.g.
+      # Fix old source like:
       #
-      # NSMutableArray *x = %orig;
+      # NSMutableArray *foo = %orig;
       #
-      # if %orig returns NSArray.
-      #
-      # This converts it to:
+      # into:
       #
       # NSArray *original = %orig;
-      # NSMutableArray *x = [original mutableCopy];
+      # NSMutableArray *foo = [original mutableCopy];
+      #
+      # Needed because newer Clang is stricter.
       # ============================================================
 
       - name: Patch legacy mutable collection assignments
@@ -109,14 +109,14 @@ jobs:
 
           ROOT = Path("main")
 
-          extensions = {
+          SOURCE_EXTENSIONS = {
               ".x",
               ".xm",
               ".m",
               ".mm",
           }
 
-          types = {
+          TYPE_MAP = {
               "NSMutableArray": "NSArray",
               "NSMutableDictionary": "NSDictionary",
               "NSMutableSet": "NSSet",
@@ -147,7 +147,7 @@ jobs:
               if not path.is_file():
                   continue
 
-              if path.suffix not in extensions:
+              if path.suffix not in SOURCE_EXTENSIONS:
                   continue
 
               try:
@@ -160,31 +160,31 @@ jobs:
 
               for line in original.splitlines():
 
-                  m = pattern.match(line)
+                  match = pattern.match(line)
 
-                  if not m:
+                  if not match:
                       output.append(line)
                       continue
 
-                  indent = m.group("indent")
-                  mutable = m.group("mutable")
-                  immutable = types[mutable]
-                  generic = m.group("generic") or ""
-                  var = m.group("var")
-                  orig = m.group("orig")
-                  tail = m.group("tail") or ""
+                  indent = match.group("indent")
+                  mutable = match.group("mutable")
+                  immutable = TYPE_MAP[mutable]
+                  generic = match.group("generic") or ""
+                  var = match.group("var")
+                  orig = match.group("orig")
+                  tail = match.group("tail") or ""
 
-                  tmp = f"__uye_original_{var}"
+                  temp = f"__uye_original_{var}"
 
                   first = (
                       f"{indent}"
-                      f"{immutable}{generic} *{tmp} = {orig};"
+                      f"{immutable}{generic} *{temp} = {orig};"
                   )
 
                   second = (
                       f"{indent}"
                       f"{mutable}{generic} *{var} = "
-                      f"[{tmp} mutableCopy];"
+                      f"[{temp} mutableCopy];"
                       f"{tail}"
                   )
 
@@ -217,7 +217,7 @@ jobs:
 
 
       # ============================================================
-      # 3. INSTALL HOST DEPENDENCIES
+      # 3. INSTALL BUILD DEPENDENCIES
       # ============================================================
 
       - name: Install dependencies
@@ -229,27 +229,24 @@ jobs:
             ldid \
             dpkg \
             make \
-            wget \
-            pipx
+            wget
 
 
       - name: Configure PATH
         shell: bash
         run: |
           echo "$(brew --prefix make)/libexec/gnubin" >> "$GITHUB_PATH"
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
 
       # ============================================================
       # 4. CHECKOUT THEOS
       #
-      # IMPORTANT:
-      # fetch-depth 0 lets us select the Theos revision that existed
-      # around the uYouEnhanced June 2025 release.
+      # We fetch full history because we want the June 2025
+      # toolchain, not current Logos/Theos.
       # ============================================================
 
       - name: Checkout Theos
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: theos/theos
           path: theos
@@ -260,9 +257,9 @@ jobs:
       # ============================================================
       # 5. PIN THEOS + LOGOS TO JUNE 2025
       #
-      # Instead of using 2026 master, select the last Theos commit
-      # that existed before June 14 2025 and initialize the exact
-      # submodule revisions recorded by that commit.
+      # uYouEnhanced 20.05.4-3.0.4 was released June 2025.
+      # Using roughly contemporary Logos avoids the newer parser
+      # rejecting old %orig syntax.
       # ============================================================
 
       - name: Pin Theos and Logos to June 2025
@@ -274,42 +271,27 @@ jobs:
 
           echo ""
           echo "=========================================="
-          echo "CURRENT THEOS"
+          echo "FINDING JUNE 2025 THEOS"
           echo "=========================================="
-
-          git rev-parse HEAD
-          git log -1 --format='%H %ci %s'
-
-
-          echo ""
-          echo "Finding Theos revision from June 2025..."
 
           LEGACY_THEOS_COMMIT="$(
             git rev-list \
               -n 1 \
               --before='2025-06-14 00:00:00 +0000' \
-              origin/master
+              HEAD
           )"
 
-
           if [ -z "$LEGACY_THEOS_COMMIT" ]; then
-            echo "ERROR: Could not find June 2025 Theos revision."
+            echo "ERROR: June 2025 Theos commit not found."
             exit 1
           fi
 
-
-          echo ""
-          echo "Legacy Theos commit:"
+          echo "Using Theos:"
           echo "$LEGACY_THEOS_COMMIT"
-
 
           git checkout \
             --detach \
             "$LEGACY_THEOS_COMMIT"
-
-
-          echo ""
-          echo "Initializing historical Theos submodules..."
 
           git submodule sync --recursive
 
@@ -328,46 +310,16 @@ jobs:
 
 
           echo ""
-          echo "Submodule revisions:"
+          echo "Submodules:"
 
           git submodule status --recursive
-
-
-          echo ""
-          echo "Logos revision:"
-
-          if [ -d vendor/logos ]; then
-
-            cd vendor/logos
-
-            git rev-parse HEAD
-            git log -1 --format='%H %ci %s'
-
-          elif [ -d logos ]; then
-
-            cd logos
-
-            git rev-parse HEAD
-            git log -1 --format='%H %ci %s'
-
-          else
-
-            echo "Logos directory location:"
-            find "$THEOS" \
-              -maxdepth 3 \
-              -type d \
-              -iname '*logos*' \
-              -print \
-              || true
-
-          fi
 
 
       # ============================================================
       # 6. DOWNLOAD IOS SDK
       #
-      # Build SDK = 17.5
-      # Minimum runtime = iOS 15.0
+      # SDK = 17.5
+      # Runtime deployment target = iOS 15.0
       # ============================================================
 
       - name: Download iOS SDK
@@ -393,7 +345,9 @@ jobs:
 
           git checkout --quiet
 
-          mv *.sdk "$THEOS/sdks/"
+          mv \
+            *.sdk \
+            "$THEOS/sdks/"
 
 
           echo ""
@@ -409,11 +363,12 @@ jobs:
       # ============================================================
 
       - name: Checkout Theos Jailed
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: qnblackcat/theos-jailed
           ref: master
           path: theos-jailed
+          submodules: recursive
 
 
       - name: Install Theos Jailed
@@ -423,43 +378,58 @@ jobs:
 
           ./theos-jailed/install
 
-      - name: Install PSHeader and YouTubeHeader
+
+      # ============================================================
+      # 8. IMPORTANT HEADER STRATEGY
+      #
+      # DO NOT copy PSHeader / YouTubeHeader into THEOS/include.
+      #
+      # Source already contains:
+      #
+      # main/Tweaks/PSHeader
+      # main/Tweaks/YouTubeHeader
+      #
+      # Root Makefile include path will reference those directly.
+      # ============================================================
+
+      - name: Verify source headers
         shell: bash
         run: |
           set -euo pipefail
 
-          if [ ! -f "main/Tweaks/PSHeader/Misc.h" ]; then
-            echo "ERROR: PSHeader missing."
-            exit 1
-          fi
+          echo "Checking source headers..."
 
-          if [ ! -f "main/Tweaks/YouTubeHeader/YTLikeStatus.h" ]; then
-            echo "ERROR: YouTubeHeader missing."
-            exit 1
-          fi
+          test -f \
+            "main/Tweaks/PSHeader/Misc.h"
 
-          mkdir -p "$THEOS/include"
+          test -f \
+            "main/Tweaks/YouTubeHeader/YTLikeStatus.h"
 
-          rm -rf "$THEOS/include/PSHeader"
-          rm -rf "$THEOS/include/YouTubeHeader"
-          rm -rf "$THEOS/include/YTHeaders"
 
-          cp -R main/Tweaks/PSHeader \
-            "$THEOS/include/PSHeader"
-
-          cp -R main/Tweaks/YouTubeHeader \
-            "$THEOS/include/YouTubeHeader"
-
-          cp -R "$THEOS/include/YouTubeHeader" \
+          # Safety cleanup.
+          # There must NOT be another copy under THEOS/include.
+          rm -rf \
+            "$THEOS/include/PSHeader" \
+            "$THEOS/include/YouTubeHeader" \
             "$THEOS/include/YTHeaders"
 
-          test -f "$THEOS/include/PSHeader/Misc.h"
-          test -f "$THEOS/include/YouTubeHeader/YTLikeStatus.h"
 
-          echo "Headers installed successfully."
+          echo ""
+          echo "Header sources:"
+
+          echo \
+            "main/Tweaks/PSHeader/Misc.h"
+
+          echo \
+            "main/Tweaks/YouTubeHeader/YTLikeStatus.h"
+
+
+          echo ""
+          echo "Duplicate THEOS/include copies removed."
+
 
       # ============================================================
-      # 8. PATCH POSSIBLE BROKEN PIPE ISSUE
+      # 9. PATCH OLD THEOS PIPE BEHAVIOUR IF PRESENT
       # ============================================================
 
       - name: Patch Theos broken pipe issue
@@ -502,35 +472,7 @@ jobs:
 
 
       # ============================================================
-      # 9. INSTALL CYAN + TBD
-      # ============================================================
-
-      - name: Install cyan and tbd
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          pipx install \
-            https://github.com/asdfzxcvbn/pyzule-rw/archive/main.zip
-
-          wget \
-            --quiet \
-            "https://github.com/inoahdev/tbd/releases/download/2.2/tbd-mac" \
-            -O /usr/local/bin/tbd
-
-          chmod +x /usr/local/bin/tbd
-
-          echo ""
-          echo "cyan:"
-          command -v cyan || true
-
-          echo ""
-          echo "tbd:"
-          command -v tbd || true
-
-
-      # ============================================================
-      # 10. STORE PRIVATE YOUTUBE IPA URL
+      # 10. PREPARE PRIVATE YOUTUBE IPA URL
       # ============================================================
 
       - name: Prepare YouTube URL
@@ -543,9 +485,11 @@ jobs:
           if [ -z "$INPUT_URL" ]; then
 
             echo "ERROR: decrypted YouTube IPA URL is empty."
+
             exit 1
 
           fi
+
 
           echo "::add-mask::$INPUT_URL"
 
@@ -555,7 +499,7 @@ jobs:
 
 
       # ============================================================
-      # 11. DOWNLOAD + EXTRACT YOUTUBE IPA
+      # 11. DOWNLOAD + EXTRACT DECRYPTED YOUTUBE
       # ============================================================
 
       - name: Prepare YouTube IPA
@@ -565,6 +509,7 @@ jobs:
           set -euo pipefail
 
           echo "Downloading decrypted YouTube IPA..."
+
 
           wget \
             "$YOUTUBE_URL" \
@@ -576,6 +521,7 @@ jobs:
           if [ ! -s "main/YouTube.ipa" ]; then
 
             echo "ERROR: downloaded IPA is empty."
+
             exit 1
 
           fi
@@ -590,6 +536,7 @@ jobs:
           cd main
 
           rm -rf Payload
+
 
           unzip \
             -q \
@@ -610,16 +557,21 @@ jobs:
           if [ -z "$APP_DIR" ]; then
 
             echo "ERROR: .app bundle not found."
+
             exit 1
 
           fi
 
 
+          echo ""
+          echo "App bundle:"
+          echo "$APP_DIR"
+
+
           if [ "$APP_DIR" != "Payload/YouTube.app" ]; then
 
-            echo "Renaming:"
-            echo "$APP_DIR"
-            echo "-> Payload/YouTube.app"
+            echo \
+              "Renaming application bundle to Payload/YouTube.app"
 
             mv \
               "$APP_DIR" \
@@ -633,7 +585,8 @@ jobs:
 
           if [ ! -f "$PLIST" ]; then
 
-            echo "ERROR: Info.plist missing."
+            echo "ERROR: Info.plist not found."
+
             exit 1
 
           fi
@@ -663,6 +616,7 @@ jobs:
           echo "=========================================="
           echo "YOUTUBE VERSION"
           echo "=========================================="
+
           echo "$VERSION"
 
 
@@ -670,22 +624,36 @@ jobs:
             "YT_VERSION=$VERSION" \
             >> "$GITHUB_ENV"
 
+
           echo \
             "version=$VERSION" \
             >> "$GITHUB_OUTPUT"
 
 
       # ============================================================
-      # 12. CONFIGURE IOS 15 TARGET
+      # 12. CONFIGURE OLD MAKEFILE FOR IOS 15
+      #
+      # IMPORTANT:
+      #
+      # ADDITIONAL_CFLAGS keeps:
+      #
+      # -I$(THEOS_PROJECT_DIR)/Tweaks
+      #
+      # This is what resolves:
+      #
+      # <PSHeader/...>
+      # <YouTubeHeader/...>
+      #
+      # without creating duplicate header copies.
       # ============================================================
 
-      - name: Configure iOS 15 build
+      - name: Configure iOS 15 Makefile
         shell: bash
         env:
           SDK_VERSION: ${{ inputs.sdk_version }}
           INPUT_BUNDLE: ${{ inputs.bundle_id }}
           INPUT_NAME: ${{ inputs.app_name }}
-          INPUT_YT: ${{ steps.youtube.outputs.version }}
+          INPUT_YOUTUBE_VERSION: ${{ steps.youtube.outputs.version }}
         run: |
           set -euo pipefail
 
@@ -698,15 +666,16 @@ jobs:
           import re
 
           p = Path("Makefile")
+
           s = p.read_text()
 
           sdk = os.environ["SDK_VERSION"]
           bundle = os.environ["INPUT_BUNDLE"]
-          name = os.environ["INPUT_NAME"]
-          youtube = os.environ["INPUT_YT"]
+          app_name = os.environ["INPUT_NAME"]
+          youtube_version = os.environ["INPUT_YOUTUBE_VERSION"]
 
 
-          def set_value(pattern, replacement):
+          def set_before_common(pattern, replacement):
 
               global s
 
@@ -724,6 +693,21 @@ jobs:
                       flags=re.MULTILINE
                   )
 
+                  return
+
+
+              marker = "include $(THEOS)/makefiles/common.mk"
+
+              if marker in s:
+
+                  s = s.replace(
+                      marker,
+                      replacement
+                      + "\n\n"
+                      + marker,
+                      1
+                  )
+
               else:
 
                   if not s.endswith("\n"):
@@ -732,47 +716,148 @@ jobs:
                   s += replacement + "\n"
 
 
-          set_value(
+          set_before_common(
               r'^export TARGET\s*=.*$',
               f'export TARGET = iphone:clang:{sdk}:15.0'
           )
 
-          set_value(
-              r'^BUNDLE_ID\s*(?:=|\?=).*$',
+
+          set_before_common(
+              r'^export SDK_PATH\s*=.*$',
+              f'export SDK_PATH = $(THEOS)/sdks/iPhoneOS{sdk}.sdk/'
+          )
+
+
+          set_before_common(
+              r'^export SYSROOT\s*=.*$',
+              'export SYSROOT = $(SDK_PATH)'
+          )
+
+
+          set_before_common(
+              r'^DISPLAY_NAME\s*(?:\?=|=).*$',
+              f'DISPLAY_NAME = {app_name}'
+          )
+
+
+          set_before_common(
+              r'^BUNDLE_ID\s*(?:\?=|=).*$',
               f'BUNDLE_ID = {bundle}'
           )
 
-          set_value(
-              r'^DISPLAY_NAME\s*(?:=|\?=).*$',
-              f'DISPLAY_NAME = {name}'
+
+          set_before_common(
+              r'^YOUTUBE_VERSION\s*(?:\?=|=).*$',
+              f'YOUTUBE_VERSION = {youtube_version}'
           )
 
-          set_value(
-              r'^YOUTUBE_VERSION\s*(?:=|\?=).*$',
-              f'YOUTUBE_VERSION = {youtube}'
+
+          #
+          # DO NOT remove these include paths.
+          #
+          # They are intentionally pointing to the source copy:
+          #
+          # main/Tweaks/YouTubeHeader
+          # main/Tweaks/PSHeader
+          #
+          cflags = (
+              'export ADDITIONAL_CFLAGS = '
+              '-I$(THEOS_PROJECT_DIR)/Tweaks/RemoteLog '
+              '-I$(THEOS_PROJECT_DIR)/Tweaks '
+              '-Wno-error=incompatible-pointer-types '
+              '-Wno-incompatible-pointer-types '
+              '-Wno-deprecated-declarations'
+          )
+
+
+          set_before_common(
+              r'^export ADDITIONAL_CFLAGS\s*=.*$',
+              cflags
           )
 
 
           p.write_text(s)
 
-          print("Main Makefile configured.")
+          print("Makefile configured successfully.")
           PY
 
 
           echo ""
           echo "=========================================="
-          echo "BUILD CONFIG"
+          echo "FINAL MAKEFILE CONFIG"
           echo "=========================================="
 
           grep \
             -E \
-            '^(export TARGET|BUNDLE_ID|DISPLAY_NAME|YOUTUBE_VERSION)' \
+            '^(export TARGET|export SDK_PATH|export SYSROOT|export ADDITIONAL_CFLAGS|DISPLAY_NAME|BUNDLE_ID|YOUTUBE_VERSION)' \
             Makefile \
             || true
 
 
       # ============================================================
-      # 13. SHOW TOOLCHAIN INFO BEFORE BUILD
+      # 13. VERIFY THERE IS ONLY ONE YOUTUBEHEADER COPY
+      # ============================================================
+
+      - name: Verify header layout
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "=========================================="
+          echo "HEADER VERIFICATION"
+          echo "=========================================="
+
+
+          test -f \
+            "main/Tweaks/YouTubeHeader/YTLikeStatus.h"
+
+          test -f \
+            "main/Tweaks/PSHeader/Misc.h"
+
+
+          if [ -e "$THEOS/include/YouTubeHeader" ]; then
+
+            echo \
+              "ERROR: duplicate THEOS/include/YouTubeHeader exists."
+
+            exit 1
+
+          fi
+
+
+          if [ -e "$THEOS/include/PSHeader" ]; then
+
+            echo \
+              "ERROR: duplicate THEOS/include/PSHeader exists."
+
+            exit 1
+
+          fi
+
+
+          if ! grep \
+            -q \
+            '\-I$(THEOS_PROJECT_DIR)/Tweaks' \
+            main/Makefile
+          then
+
+            echo \
+              "ERROR: Tweaks include path missing from Makefile."
+
+            exit 1
+
+          fi
+
+
+          echo \
+            "SUCCESS: one header tree only."
+
+          echo \
+            "Headers resolved using -I$(THEOS_PROJECT_DIR)/Tweaks"
+
+
+      # ============================================================
+      # 14. BUILD ENVIRONMENT INFO
       # ============================================================
 
       - name: Show build environment
@@ -815,12 +900,14 @@ jobs:
 
 
       # ============================================================
-      # 14. BUILD
+      # 15. BUILD UYOUENHANCED
       #
-      # Important:
-      # No component is disabled here.
-      # We are trying to reproduce the older build environment
-      # instead of deleting half of uYouEnhanced.
+      # IMPORTANT:
+      #
+      # DO NOT pass ADDITIONAL_CFLAGS=... here.
+      #
+      # Doing that would overwrite the Makefile include paths and
+      # cause PSHeader / YouTubeHeader to disappear again.
       # ============================================================
 
       - name: Build uYouEnhanced IPA
@@ -851,8 +938,7 @@ jobs:
             IPA=Payload/YouTube.app \
             FINALPACKAGE=1 \
             YTUHD_ENABLED=0 \
-            SPONSORBLOCK_ENABLED=0 \
-            ADDITIONAL_CFLAGS="-Wno-error=incompatible-pointer-types -Wno-incompatible-pointer-types -Wno-deprecated-declarations"
+            SPONSORBLOCK_ENABLED=0
 
 
           echo ""
@@ -876,14 +962,15 @@ jobs:
               -type f \
               -name '*.ipa' \
               -print \
-              | head -n 1
+              | head -n 1 \
+              || true
           )"
 
 
           if [ -z "$IPA_FILE" ]; then
 
             echo ""
-            echo "ERROR: no IPA was produced."
+            echo "ERROR: build finished but no IPA exists."
 
             exit 1
 
@@ -902,6 +989,10 @@ jobs:
 
           echo "$IPA_NAME"
 
+
+          echo ""
+          echo "Size:"
+
           ls -lh "$IPA_FILE"
 
 
@@ -919,7 +1010,7 @@ jobs:
 
 
       # ============================================================
-      # 15. UPLOAD RESULT
+      # 16. UPLOAD IPA
       # ============================================================
 
       - name: Upload IPA Artifact
@@ -933,7 +1024,7 @@ jobs:
 
 
       # ============================================================
-      # 16. CREATE DRAFT RELEASE
+      # 17. CREATE DRAFT RELEASE
       # ============================================================
 
       - name: Create Draft Release
@@ -942,14 +1033,16 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tag_name: ios15-legacy-${{ github.run_number }}
-          name: uYouEnhanced iOS 15 Legacy Build ${{ github.run_number }}
+          tag_name: ios15-${{ github.run_number }}
+          name: uYouEnhanced iOS 15 Build ${{ github.run_number }}
           draft: true
           prerelease: false
-          files: main/packages/${{ steps.build.outputs.ipa }}
+
+          files: |
+            main/packages/${{ steps.build.outputs.ipa }}
 
           body: |
-            uYouEnhanced iOS/iPadOS 15 custom build.
+            Custom uYouEnhanced build for iOS/iPadOS 15.
 
             YouTube:
             ${{ steps.youtube.outputs.version }}
@@ -960,14 +1053,14 @@ jobs:
             uYouEnhanced source:
             ${{ inputs.commit_id }}
 
-            Build strategy:
-            - Source from v20.05.4-3.0.4 era
-            - Theos pinned to June 2025
-            - Logos pinned through historical Theos submodule state
-            - SDK 17.5
-            - Deployment target iOS 15.0
-            - Legacy mutable-collection compatibility patch
-            - No major uYouEnhanced component disabled
+            Build:
+            - iOS SDK 17.5
+            - iOS deployment target 15.0
+            - Theos/Logos pinned to June 2025
+            - PSHeader loaded directly from Tweaks
+            - YouTubeHeader loaded directly from Tweaks
+            - No duplicated THEOS/include header tree
+            - Legacy NSMutable compatibility patch
 
-            Intended installer:
+            Installer:
             TrollStore
