@@ -118,12 +118,14 @@ jobs:
               "Tweaks/Return-YouTube-Dislikes",
               "Tweaks/YTABConfig",
               "Tweaks/YouPiP",
+              "Tweaks/YTVideoOverlay",
           ]
 
           disabled_dylibs = [
               "YouTubeDislikesReturn.dylib",
               "YTABConfig.dylib",
               "YouPiP.dylib",
+              "YTVideoOverlay.dylib",
           ]
 
           # Remove complete INJECT_DYLIBS lines for the disabled dylibs.
@@ -174,7 +176,7 @@ jobs:
           echo "=========================================="
 
           if grep -E \
-            'Tweaks/Return-YouTube-Dislikes|Tweaks/YTABConfig|Tweaks/YouPiP|YouTubeDislikesReturn\.dylib|YTABConfig\.dylib|YouPiP\.dylib' \
+            'Tweaks/Return-YouTube-Dislikes|Tweaks/YTABConfig|Tweaks/YouPiP|Tweaks/YTVideoOverlay|YouTubeDislikesReturn\.dylib|YTABConfig\.dylib|YouPiP\.dylib|YTVideoOverlay\.dylib' \
             main/Makefile
           then
 
@@ -676,7 +678,7 @@ jobs:
           echo "Checking disabled components..."
 
           if grep -E \
-            'Tweaks/Return-YouTube-Dislikes|Tweaks/YTABConfig|Tweaks/YouPiP|YouTubeDislikesReturn\.dylib|YTABConfig\.dylib|YouPiP\.dylib' \
+            'Tweaks/Return-YouTube-Dislikes|Tweaks/YTABConfig|Tweaks/YouPiP|Tweaks/YTVideoOverlay|YouTubeDislikesReturn\.dylib|YTABConfig\.dylib|YouPiP\.dylib|YTVideoOverlay\.dylibTweaks/Return-YouTube-Dislikes|Tweaks/YTABConfig|Tweaks/YouPiP|Tweaks/YTVideoOverlay|YouTubeDislikesReturn\.dylib|YTABConfig\.dylib|YouPiP\.dylib|YTVideoOverlay\.dylib' \
             main/Makefile
           then
 
